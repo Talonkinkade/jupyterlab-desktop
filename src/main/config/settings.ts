@@ -3,7 +3,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import { getOldUserConfigPath, getUserDataDir, getUserHomeDir } from '../utils';
+import { getUserDataDir, getUserHomeDir } from '../utils';
 
 export const DEFAULT_WIN_WIDTH = 1024;
 export const DEFAULT_WIN_HEIGHT = 768;
@@ -35,11 +35,20 @@ export enum CtrlWBehavior {
   DoNotClose = 'do-not-close'
 }
 
+export enum UIMode {
+  MultiDocument = 'multi-document',
+  SingleDocument = 'single-document',
+  Zen = 'zen',
+  ManagedByWebApp = 'managed-by-web-app' // let JupyterLab web app manage the layout
+}
+
 export type KeyValueMap = { [key: string]: string };
 
 export enum SettingType {
   checkForUpdatesAutomatically = 'checkForUpdatesAutomatically',
   installUpdatesAutomatically = 'installUpdatesAutomatically',
+  notifyOnBundledEnvUpdates = 'notifyOnBundledEnvUpdates',
+  updateBundledEnvAutomatically = 'updateBundledEnvAutomatically',
 
   theme = 'theme',
   syncJupyterLabTheme = 'syncJupyterLabTheme',
@@ -55,7 +64,16 @@ export enum SettingType {
 
   ctrlWBehavior = 'ctrlWBehavior',
 
-  logLevel = 'logLevel'
+  logLevel = 'logLevel',
+
+  condaPath = 'condaPath',
+  systemPythonPath = 'systemPythonPath',
+  pythonEnvsPath = 'pythonEnvsPath',
+  condaChannels = 'condaChannels',
+
+  uiMode = 'uiMode',
+  uiModeForSingleFileOpen = 'uiModeForSingleFileOpen',
+  showTOCInZenMode = 'showTOCInZenMode'
 }
 
 export const serverLaunchArgsFixed = [
@@ -95,11 +113,15 @@ export class Setting<T> {
   }
 
   get differentThanDefault(): boolean {
-    return this.value !== this._defaultValue;
+    return JSON.stringify(this.value) !== JSON.stringify(this._defaultValue);
   }
 
   get wsOverridable(): boolean {
     return this?._options?.wsOverridable;
+  }
+
+  setToDefault() {
+    this._value = this._defaultValue;
   }
 
   private _defaultValue: T;
@@ -119,6 +141,8 @@ export class UserSettings {
     this._settings = {
       checkForUpdatesAutomatically: new Setting<boolean>(true),
       installUpdatesAutomatically: new Setting<boolean>(true),
+      notifyOnBundledEnvUpdates: new Setting<boolean>(true),
+      updateBundledEnvAutomatically: new Setting<boolean>(false),
       showNewsFeed: new Setting<boolean>(true),
 
       /* making themes workspace overridable is not feasible.
@@ -141,12 +165,32 @@ export class UserSettings {
 
       ctrlWBehavior: new Setting<CtrlWBehavior>(CtrlWBehavior.CloseTab),
 
-      logLevel: new Setting<string>(LogLevel.Warn)
+      logLevel: new Setting<string>(LogLevel.Warn),
+
+      condaPath: new Setting<string>(''),
+      systemPythonPath: new Setting<string>(''),
+      pythonEnvsPath: new Setting<string>(''),
+      condaChannels: new Setting<string[]>(['conda-forge']),
+
+      uiMode: new Setting<UIMode>(UIMode.ManagedByWebApp, {
+        wsOverridable: true
+      }),
+      uiModeForSingleFileOpen: new Setting<UIMode>(UIMode.Zen),
+      showTOCInZenMode: new Setting<boolean>(false)
     };
 
     if (readSettings) {
       this.read();
     }
+  }
+
+  static getUserSettingsPath(): string {
+    const userDataDir = getUserDataDir();
+    return path.join(userDataDir, 'settings.json');
+  }
+
+  get settings() {
+    return this._settings;
   }
 
   getValue(setting: SettingType) {
@@ -157,11 +201,13 @@ export class UserSettings {
     this._settings[setting].value = value;
   }
 
+  unsetValue(setting: SettingType) {
+    this._settings[setting].setToDefault();
+  }
+
   read() {
-    const userSettingsPath = this._getUserSettingsPath();
+    const userSettingsPath = UserSettings.getUserSettingsPath();
     if (!fs.existsSync(userSettingsPath)) {
-      // TODO: remove after 07/2023
-      this._migrateFromOldSettings();
       return;
     }
     const data = fs.readFileSync(userSettingsPath);
@@ -175,25 +221,8 @@ export class UserSettings {
     }
   }
 
-  private _migrateFromOldSettings() {
-    const oldSettings = getOldSettings();
-
-    if (SettingType.checkForUpdatesAutomatically in oldSettings) {
-      this._settings[SettingType.checkForUpdatesAutomatically].value =
-        oldSettings[SettingType.checkForUpdatesAutomatically];
-    }
-    if (SettingType.installUpdatesAutomatically in oldSettings) {
-      this._settings[SettingType.installUpdatesAutomatically].value =
-        oldSettings[SettingType.installUpdatesAutomatically];
-    }
-    if (SettingType.pythonPath in oldSettings) {
-      this._settings[SettingType.pythonPath].value =
-        oldSettings[SettingType.pythonPath];
-    }
-  }
-
   save() {
-    const userSettingsPath = this._getUserSettingsPath();
+    const userSettingsPath = UserSettings.getUserSettingsPath();
     const userSettings: { [key: string]: any } = {};
 
     for (let key in SettingType) {
@@ -212,11 +241,6 @@ export class UserSettings {
     );
   }
 
-  private _getUserSettingsPath(): string {
-    const userDataDir = getUserDataDir();
-    return path.join(userDataDir, 'settings.json');
-  }
-
   protected _settings: { [key: string]: Setting<any> };
 }
 
@@ -226,6 +250,14 @@ export class WorkspaceSettings extends UserSettings {
 
     this._workingDirectory = resolveWorkingDirectory(workingDirectory);
     this.read();
+  }
+
+  get settings() {
+    return this._wsSettings;
+  }
+
+  hasValue(setting: SettingType) {
+    return setting in this._wsSettings;
   }
 
   getValue(setting: SettingType) {
@@ -244,10 +276,16 @@ export class WorkspaceSettings extends UserSettings {
     this._wsSettings[setting].value = value;
   }
 
+  unsetValue(setting: SettingType) {
+    delete this._wsSettings[setting];
+  }
+
   read() {
     super.read();
 
-    const wsSettingsPath = this._getWorkspaceSettingsPath();
+    const wsSettingsPath = WorkspaceSettings.getWorkspaceSettingsPath(
+      this._workingDirectory
+    );
     if (!fs.existsSync(wsSettingsPath)) {
       return;
     }
@@ -266,15 +304,20 @@ export class WorkspaceSettings extends UserSettings {
   }
 
   save() {
-    const wsSettingsPath = this._getWorkspaceSettingsPath();
+    const wsSettingsPath = WorkspaceSettings.getWorkspaceSettingsPath(
+      this._workingDirectory
+    );
     const wsSettings: { [key: string]: any } = {};
 
+    // uiMode needs special handling, it needs to be saved even if same as global default.
+    // this is due to automatically setting uiMode to Zen for default for opening single file
     for (let key in SettingType) {
       const setting = this._wsSettings[key];
       if (
         setting &&
         this._settings[key].wsOverridable &&
-        this._isDifferentThanUserSetting(key as SettingType)
+        (key === SettingType.uiMode ||
+          this._isDifferentThanUserSetting(key as SettingType))
       ) {
         wsSettings[key] = setting.value;
       }
@@ -304,12 +347,8 @@ export class WorkspaceSettings extends UserSettings {
     return false;
   }
 
-  private _getWorkspaceSettingsPath(): string {
-    return path.join(
-      this._workingDirectory,
-      '.jupyter',
-      'desktop-settings.json'
-    );
+  static getWorkspaceSettingsPath(workingDirectory: string): string {
+    return path.join(workingDirectory, '.jupyter', 'desktop-settings.json');
   }
 
   private _workingDirectory: string;
@@ -340,24 +379,6 @@ export function resolveWorkingDirectory(
   }
 
   return resolved;
-}
-
-let _oldSettings: any;
-
-export function getOldSettings() {
-  if (_oldSettings) {
-    return _oldSettings;
-  }
-
-  try {
-    const oldConfigPath = getOldUserConfigPath();
-    const configData = JSON.parse(fs.readFileSync(oldConfigPath).toString());
-    _oldSettings = configData['jupyterlab-desktop']['JupyterLabDesktop'];
-  } catch (error) {
-    _oldSettings = {};
-  }
-
-  return _oldSettings;
 }
 
 export const userSettings = new UserSettings();

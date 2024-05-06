@@ -12,13 +12,14 @@ const cli = meow(
       $ node buildutil <options>
 
     Options
-      --check-version-match      check for JupyterLab version match
-      --update-binary-sign-list  update binary list to sign for macOS
-      --platform                 platform for --update-binary-sign-list. osx-64 or osx-arm64
+      --check-version-match         check for JupyterLab version match
+      --update-binary-sign-list     update binary list to sign for macOS
+      --copy-extras-to-bundled-env  copy extra files from extras to bundled environment installer
+      --platform                    platform for --update-binary-sign-list. osx-64 or osx-arm64
 
     Other options:
-      --help                     show usage information
-      --version                  show version information
+      --help                        show usage information
+      --version                     show version information
 
     Examples
       $ node buildutil --check-version-match
@@ -93,20 +94,62 @@ if (cli.flags.checkVersionMatch) {
 if (cli.flags.updateBinarySignList) {
   const { isBinary } = require('istextorbinary');
   const envInstallerDir = path.resolve('env_installer', 'jlab_server');
-  const envBinDir = path.join(envInstallerDir, 'bin');
 
+  const getFileExtension = filePath => {
+    const lastDot = filePath.lastIndexOf('.');
+    if (lastDot !== -1) {
+      return filePath.substring(lastDot + 1);
+    }
+  };
+
+  const skipExtensions = new Set([
+    'a',
+    'bz2',
+    'dat',
+    'eot',
+    'exe',
+    'gif',
+    'gz',
+    'jpg',
+    'icns',
+    'ico',
+    'mo',
+    'npy',
+    'npz',
+    'parquet',
+    'pdf',
+    'pkl',
+    'png',
+    'ppm',
+    'pyc',
+    'testcase',
+    'tiff',
+    'ttf',
+    'wav',
+    'whl',
+    'woff',
+    'woff2',
+    'xz',
+    'zip'
+  ]);
+
+  const skipPathComponents = [
+    '/pytz/zoneinfo/',
+    '/tzdata/zoneinfo/',
+    'share/terminfo/'
+  ];
+
+  // sign binary files except for certain extensions and certain directories
   const needsSigning = filePath => {
-    // conly consider bin directory, and .so, .dylib files in other directories
-    if (
-      filePath.startsWith(envBinDir) ||
-      filePath.endsWith('.so') ||
-      filePath.endsWith('.dylib')
-    ) {
-      // check for binary content
-      return isBinary(null, fs.readFileSync(filePath));
+    const skippedPath = skipPathComponents.find(component => {
+      return filePath.includes(component);
+    });
+
+    if (skippedPath || skipExtensions.has(getFileExtension(filePath))) {
+      return false;
     }
 
-    return false;
+    return isBinary(null, fs.readFileSync(filePath));
   };
 
   const findBinariesInDirectory = dirPath => {
@@ -137,6 +180,19 @@ if (cli.flags.updateBinarySignList) {
   fs.writeFileSync(signListFile, `${fileContent}\n`);
 
   console.log(`Saved binary sign list to ${signListFile}`);
+
+  process.exit(0);
+}
+
+if (cli.flags.copyExtrasToBundledEnv) {
+  const envExtrasDir = path.resolve('env_installer', 'extras');
+  const envInstallerDir = path.resolve('env_installer', 'jlab_server');
+
+  fs.copySync(envExtrasDir, envInstallerDir, { recursive: true });
+
+  console.log(
+    `Finished copying env extras from \n\t"${envExtrasDir}" to \n\t"${envInstallerDir}"`
+  );
 
   process.exit(0);
 }

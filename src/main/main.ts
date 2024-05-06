@@ -1,13 +1,34 @@
 import { app, Menu, MenuItem } from 'electron';
-import log, { LevelOption } from 'electron-log';
+
+// Update paths to prevent Snap saving persistent data to version specific paths.
+// (Must be called before any other initialization)
+updatePathsForSnap();
+
 import * as fs from 'fs';
-import { getAppDir, isDevMode, waitForFunction } from './utils';
-import { execSync } from 'child_process';
+import * as semver from 'semver';
+import {
+  bundledEnvironmentIsInstalled,
+  EnvironmentInstallStatus,
+  getBundledPythonEnvPath,
+  getBundledPythonPath,
+  installBundledEnvironment,
+  isDevMode,
+  jlabCLICommandIsSetup,
+  setupJlabCommandWithUserRights,
+  versionWithoutSuffix,
+  waitForDuration,
+  waitForFunction
+} from './utils';
+
+import log, { LevelOption } from 'electron-log';
 import { JupyterApplication } from './app';
 import { ICLIArguments } from './tokens';
 import { SessionConfig } from './config/sessionconfig';
 import { SettingType, userSettings } from './config/settings';
 import { parseCLIArgs } from './cli';
+import { getPythonEnvsDirectory, runCommandInEnvironment } from './env';
+import { ThemedWindow } from './dialog/themedwindow';
+import { appData } from './config/appdata';
 
 let jupyterApp: JupyterApplication;
 let fileToOpenInMainInstance = '';
@@ -29,6 +50,32 @@ async function appReady(): Promise<boolean> {
  * This package fixes the PATH variable
  */
 require('fix-path')();
+
+/**
+ * Update app home, appData, userData and logs paths to prevent
+ * Snap to save Python environments and logs in version specific locations
+ */
+function updatePathsForSnap() {
+  const isSnap = (): boolean => {
+    return process.platform === 'linux' && process.env.SNAP !== undefined;
+  };
+
+  if (!isSnap()) {
+    return;
+  }
+
+  const userHome = process.env.HOME;
+  process.env.XDG_CONFIG_HOME = `${userHome}/.config`;
+  // Jupyter uses this path (.local/share)
+  process.env.XDG_DATA_HOME = `${userHome}/.local/share`;
+  const appDataDir = process.env.XDG_CONFIG_HOME;
+  const userDataDir = `${appDataDir}/${app.getName()}`;
+
+  app.setPath('home', userHome);
+  app.setPath('appData', appDataDir);
+  app.setPath('userData', userDataDir);
+  app.setAppLogsPath(`${userDataDir}/logs`);
+}
 
 function getLogLevel(): LevelOption {
   if (isDevMode()) {
@@ -115,22 +162,20 @@ function setupJLabCommand() {
     return;
   }
 
-  const symlinkPath = '/usr/local/bin/jlab';
-  const targetPath = `${getAppDir()}/app/jlab`;
-
-  if (!fs.existsSync(targetPath)) {
+  if (jlabCLICommandIsSetup()) {
     return;
   }
 
-  try {
-    if (!fs.existsSync(symlinkPath)) {
-      const cmd = `ln -s ${targetPath} ${symlinkPath}`;
-      execSync(cmd, { shell: '/bin/bash' });
-      fs.chmodSync(symlinkPath, 0o755);
-    }
+  setupJlabCommandWithUserRights();
+}
 
-    // after a DMG install, mode resets
-    fs.chmodSync(targetPath, 0o755);
+function createPythonEnvsDirectory() {
+  const envsDir = getPythonEnvsDirectory();
+
+  try {
+    if (!fs.existsSync(envsDir)) {
+      fs.mkdirSync(envsDir, { recursive: true });
+    }
   } catch (error) {
     log.error(error);
   }
@@ -179,9 +224,11 @@ app.on('ready', async () => {
 
   try {
     await handleMultipleAppInstances();
+    await updateBundledPythonEnvInstallation();
     redirectConsoleToLog();
     setApplicationMenu();
     setupJLabCommand();
+    createPythonEnvsDirectory();
     argv.cwd = process.cwd();
     jupyterApp = new JupyterApplication((argv as unknown) as ICLIArguments);
   } catch (error) {
@@ -195,7 +242,9 @@ function processArgs(): Promise<void> {
     parseCLIArgs(process.argv.slice(isDevMode() ? 2 : 1)).then(value => {
       argv = value;
       if (
-        ['--help', '--version', 'env'].find(arg => process.argv?.includes(arg))
+        ['--help', '--version', 'env', 'config', 'appdata', 'logs'].find(arg =>
+          process.argv?.includes(arg)
+        )
       ) {
         app.quit();
         return;
@@ -243,5 +292,133 @@ function handleMultipleAppInstances(): Promise<void> {
       // is second instance
       reject('Handling request in the main instance.');
     }
+  });
+}
+
+async function needToUpdateBundledPythonEnvInstallation(): Promise<boolean> {
+  // update on restart requested
+  if (appData.updateBundledEnvOnRestart) {
+    return true;
+  }
+
+  // update if auto update is
+  if (
+    !(
+      userSettings.getValue(SettingType.updateBundledEnvAutomatically) &&
+      bundledEnvironmentIsInstalled()
+    )
+  ) {
+    return false;
+  }
+
+  const appDataEnvironments = [
+    ...appData.discoveredPythonEnvs,
+    ...appData.userSetPythonEnvs
+  ];
+  const bundledPythonPath = getBundledPythonPath();
+  const bundledEnvInAppData = appDataEnvironments.find(
+    env => bundledPythonPath === env.path
+  );
+
+  const appVersion = app.getVersion();
+
+  try {
+    // if the version in appData is latest, then assume it is latest
+    if (bundledEnvInAppData) {
+      const jlabVersionInAppData = bundledEnvInAppData.versions['jupyterlab'];
+
+      if (
+        semver.compare(
+          versionWithoutSuffix(jlabVersionInAppData),
+          versionWithoutSuffix(appVersion)
+        ) >= 0
+      ) {
+        return false;
+      }
+    }
+
+    // if not latest in appData check the active jupyterlab version
+    // in case appData is outdated
+    let outputVersion = '';
+    if (
+      await runCommandInEnvironment(
+        getBundledPythonEnvPath(),
+        `python -c "import jupyterlab; print(jupyterlab.__version__)"`,
+        {
+          stdout: msg => {
+            outputVersion += msg;
+          }
+        }
+      )
+    ) {
+      if (
+        semver.compare(
+          versionWithoutSuffix(outputVersion.trim()),
+          versionWithoutSuffix(appVersion)
+        ) === -1
+      ) {
+        return true;
+      }
+    }
+  } catch (error) {
+    log.error('Failed to check for env update need.', error);
+  }
+
+  return false;
+}
+
+async function updateBundledPythonEnvInstallation() {
+  if (!(await needToUpdateBundledPythonEnvInstallation())) {
+    return;
+  }
+
+  const statusDialog = new ThemedWindow({
+    isDarkTheme: true,
+    title: 'Updating bundled environment installation',
+    width: 400,
+    height: 150,
+    closable: false
+  });
+
+  const setStatusMessage = (message: string) => {
+    statusDialog.loadDialogContent(message);
+    waitForDuration(100);
+  };
+
+  setStatusMessage('Reinstalling environment.');
+
+  const installPath = getBundledPythonEnvPath();
+  await installBundledEnvironment(installPath, {
+    onInstallStatus: (status, message) => {
+      log.info(`Bundled env install status: ${status}, message ${message}`);
+      switch (status) {
+        case EnvironmentInstallStatus.RemovingExistingInstallation:
+          setStatusMessage('Removing existing installation...');
+          break;
+        case EnvironmentInstallStatus.Started:
+          setStatusMessage('Installing new version...');
+          break;
+        case EnvironmentInstallStatus.Success:
+          {
+            appData.updateBundledEnvOnRestart = false;
+            setStatusMessage('Finished updating.');
+            setTimeout(() => {
+              statusDialog.close();
+            }, 2000);
+          }
+          break;
+        case EnvironmentInstallStatus.Failure:
+          setStatusMessage('Failed to update! See logs for more details.');
+          setTimeout(() => {
+            statusDialog.close();
+          }, 3000);
+          break;
+      }
+    },
+    get forceOverwrite() {
+      return true;
+    }
+  }).catch(reason => {
+    log.error('Failed to update the bundled environment!', reason);
   });
 }

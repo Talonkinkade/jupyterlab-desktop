@@ -17,6 +17,8 @@ import {
   DEFAULT_WIN_HEIGHT,
   DEFAULT_WIN_WIDTH,
   SettingType,
+  UIMode,
+  userSettings,
   WorkspaceSettings
 } from '../config/settings';
 import { TitleBarView } from '../titlebarview/titlebarview';
@@ -48,7 +50,7 @@ import { SessionConfig } from '../config/sessionconfig';
 import { ISignal, Signal } from '@lumino/signaling';
 import { EventTypeMain } from '../eventtypes';
 import { EventManager } from '../eventmanager';
-import { runCommandInEnvironment } from '../cli';
+import { runCommandInEnvironment } from '../env';
 
 export enum ContentViewType {
   Welcome = 'welcome',
@@ -71,7 +73,7 @@ export interface IServerInfo {
 }
 
 const titleBarHeight = 29;
-const defaultEnvSelectPopupHeight = 300;
+const defaultEnvSelectPopupHeight = 330;
 
 export class SessionWindow implements IDisposable {
   constructor(options: SessionWindow.IOptions) {
@@ -285,10 +287,6 @@ export class SessionWindow implements IDisposable {
         this._recentSessionsChangedHandler,
         this
       );
-      this._registry.environmentListUpdated.disconnect(
-        this._onEnvironmentListUpdated,
-        this
-      );
 
       this._disposeSession().then(() => {
         this._disposePromise = null;
@@ -406,6 +404,30 @@ export class SessionWindow implements IDisposable {
         this._titleBarView.showServerStatus(true);
       });
     }
+
+    if (userSettings.getValue(SettingType.notifyOnBundledEnvUpdates)) {
+      let showServerNotificationBadge = false;
+      const serverInfo = this.getServerInfo();
+      if (
+        serverInfo &&
+        serverInfo.type === 'local' &&
+        serverInfo.environment?.path === getBundledPythonPath()
+      ) {
+        if (!this._registry.bundledEnvironmentIsLatest()) {
+          showServerNotificationBadge = true;
+        }
+      }
+      this._titleBarView.showServerNotificationBadge(
+        showServerNotificationBadge
+      );
+    }
+
+    // initialize UI mode to workspace default or app default
+    const uiMode = this._labView.shouldSetToSingleFileUIMode()
+      ? userSettings.getValue(SettingType.uiModeForSingleFileOpen)
+      : this._wsSettings.getValue(SettingType.uiMode);
+
+    this._setUIMode(uiMode, false);
   }
 
   get titleBarView(): TitleBarView {
@@ -450,11 +472,6 @@ export class SessionWindow implements IDisposable {
   private _registerListeners() {
     appData.recentSessionsChanged.connect(
       this._recentSessionsChangedHandler,
-      this
-    );
-
-    this._registry.environmentListUpdated.connect(
-      this._onEnvironmentListUpdated,
       this
     );
 
@@ -540,7 +557,7 @@ export class SessionWindow implements IDisposable {
               <a href="javascript:void(0);" onclick="sendMessageToMain('${EventTypeMain.InstallBundledPythonEnv}')">Install / update Python environment using the bundled installer</a>
             </div>
             <div class="message-row">
-              <a href="javascript:void(0);" onclick="sendMessageToMain('${EventTypeMain.ShowServerSettings}')">Change the default Python environment</a>
+              <a href="javascript:void(0);" onclick="sendMessageToMain('${EventTypeMain.ShowManagePythonEnvironmentsDialog}', 'settings')">Change the default Python environment</a>
             </div>
           `,
             false
@@ -553,8 +570,12 @@ export class SessionWindow implements IDisposable {
         this._sessionConfigChanged.emit();
 
         if (type === 'notebook') {
-          this.labView.labUIReady.then(() => {
-            this.labView.newNotebook();
+          this.labView.labUIReady.then(async () => {
+            await this.labView.newNotebook();
+            this._setUIMode(
+              userSettings.getValue(SettingType.uiModeForSingleFileOpen),
+              false
+            );
             this._hideProgressView();
           });
         } else {
@@ -780,7 +801,7 @@ export class SessionWindow implements IDisposable {
     });
 
     this._evm.registerEventHandler(
-      EventTypeMain.SetPythonPath,
+      EventTypeMain.SetSessionPythonPath,
       async (event, path) => {
         if (event.sender !== this._envSelectPopup?.view?.view?.webContents) {
           return;
@@ -845,6 +866,80 @@ export class SessionWindow implements IDisposable {
         return;
       }
 
+      const inSession =
+        this._contentViewType === ContentViewType.Lab &&
+        !this._progressViewVisible;
+      const inLocalSession = inSession && !this._sessionConfig?.remoteURL;
+
+      const uiModeSubmenu: MenuItemConstructorOptions[] = [
+        {
+          label: 'UI Mode',
+          visible:
+            this._contentViewType === ContentViewType.Lab &&
+            !this._progressViewVisible,
+          type: 'submenu',
+          submenu: [
+            {
+              label: 'Zen Mode',
+              click: () => {
+                this._setUIMode(UIMode.Zen);
+              },
+              type: 'checkbox',
+              checked:
+                this._contentViewType === ContentViewType.Lab &&
+                this._labView.uiMode === UIMode.Zen
+            },
+            {
+              label: 'Single document IDE',
+              click: () => {
+                this._setUIMode(UIMode.SingleDocument);
+              },
+              type: 'checkbox',
+              checked:
+                this._contentViewType === ContentViewType.Lab &&
+                this._labView.uiMode === UIMode.SingleDocument
+            },
+            {
+              label: 'Multi document IDE',
+              click: () => {
+                this._setUIMode(UIMode.MultiDocument);
+              },
+              type: 'checkbox',
+              checked:
+                this._contentViewType === ContentViewType.Lab &&
+                this._labView.uiMode === UIMode.MultiDocument
+            },
+            {
+              label: 'Managed by web app',
+              click: () => {
+                this._setUIMode(UIMode.ManagedByWebApp);
+              },
+              type: 'checkbox',
+              checked:
+                this._contentViewType === ContentViewType.Lab &&
+                this._labView.uiMode === UIMode.ManagedByWebApp
+            },
+            { type: 'separator' },
+            {
+              label: 'Reset to session default',
+              click: () => {
+                this._resetUIModeToSessionDefault();
+              }
+            }
+          ]
+        }
+      ];
+
+      const closeSessionMenuItem: MenuItemConstructorOptions[] = [
+        {
+          label: 'Close Session',
+          click: () => {
+            this._closeSession();
+          }
+        },
+        { type: 'separator' }
+      ];
+
       const template: MenuItemConstructorOptions[] = [
         {
           label: 'New Window',
@@ -852,20 +947,19 @@ export class SessionWindow implements IDisposable {
             this._newWindow();
           }
         },
-        {
-          label: 'Close Session',
-          visible:
-            this._contentViewType === ContentViewType.Lab &&
-            !this._progressViewVisible,
-          click: () => {
-            this._closeSession();
-          }
-        },
+        ...(inLocalSession ? uiModeSubmenu : []),
         { type: 'separator' },
+        ...(inSession ? closeSessionMenuItem : []),
         {
           label: 'Settings',
           click: () => {
             this._app.showSettingsDialog();
+          }
+        },
+        {
+          label: 'Manage Python environments',
+          click: () => {
+            this._app.showManagePythonEnvsDialog();
           }
         },
         {
@@ -948,6 +1042,70 @@ export class SessionWindow implements IDisposable {
         }
       }
     );
+
+    this._evm.registerEventHandler(
+      EventTypeMain.RestartSession,
+      async event => {
+        if (event.sender !== this._envSelectPopup?.view?.view?.webContents) {
+          return;
+        }
+
+        let currentPythonPath = this._wsSettings.getValue(
+          SettingType.pythonPath
+        );
+        if (!currentPythonPath) {
+          const defaultEnv = await this.registry.getDefaultEnvironment();
+          if (defaultEnv) {
+            currentPythonPath = defaultEnv.path;
+          }
+        }
+
+        if (!currentPythonPath) {
+          return;
+        }
+
+        this._hideEnvSelectPopup();
+        this._restartServerInPythonEnvironment(currentPythonPath);
+      }
+    );
+
+    this._evm.registerEventHandler(
+      EventTypeMain.CopySessionInfoToClipboard,
+      event => {
+        if (event.sender !== this._envSelectPopup?.view?.view?.webContents) {
+          return;
+        }
+
+        const serverInfo = this.getServerInfo();
+
+        let content = '';
+
+        if (serverInfo.type === 'local') {
+          content = [
+            'type: local server',
+            `url: ${serverInfo.url}`,
+            `server root: ${serverInfo.workingDirectory}`,
+            `env name: ${serverInfo.environment.name}`,
+            `env Python path: ${serverInfo.environment.path}`,
+            `versions: ${JSON.stringify(serverInfo.environment.versions)}`
+          ].join('\n');
+        } else {
+          const url = new URL(serverInfo.url);
+          const isLocalUrl =
+            url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+
+          content = [
+            `type: ${isLocalUrl ? 'local' : 'remote'} connection`,
+            `url: ${serverInfo.url}`,
+            `session data: ${
+              serverInfo.persistSessionData ? '' : 'not '
+            }persisted`
+          ].join('\n');
+        }
+
+        clipboard.writeText(content);
+      }
+    );
   }
 
   private _restartServerInPythonEnvironment(pythonPath: string) {
@@ -979,7 +1137,7 @@ export class SessionWindow implements IDisposable {
     }
   }
 
-  async getServerInfo(): Promise<IServerInfo> {
+  getServerInfo(): IServerInfo {
     if (this._contentViewType !== ContentViewType.Lab) {
       return null;
     }
@@ -1116,15 +1274,31 @@ export class SessionWindow implements IDisposable {
   }
 
   private async _createEnvSelectPopup() {
-    const envs = await this.registry.getEnvironmentList(false);
-    const defaultEnv = await this._registry.getDefaultEnvironment();
+    let defaultEnv: IPythonEnvironment;
+    try {
+      defaultEnv = await this._registry.getDefaultEnvironment();
+    } catch (error) {
+      //
+    }
+
     const defaultPythonPath = defaultEnv ? defaultEnv.path : '';
 
     this._envSelectPopup = new PythonEnvironmentSelectPopup({
+      app: this._app,
       isDarkTheme: this._isDarkTheme,
-      envs,
+      envs: [], // start with empty list, populate later
       bundledPythonPath: getBundledPythonPath(),
       defaultPythonPath
+    });
+
+    const listPromise = this.registry.getEnvironmentList(false);
+
+    this._envSelectPopup.view.view.webContents.on('did-finish-load', () => {
+      listPromise.then(envs => {
+        this._envSelectPopup.setPythonEnvironmentList(envs);
+        this._resizeEnvSelectPopup();
+        this._envSelectPopup.resetView();
+      });
     });
 
     this._envSelectPopup.load();
@@ -1135,20 +1309,30 @@ export class SessionWindow implements IDisposable {
       return;
     }
 
-    let currentPythonPath = this._wsSettings.getValue(SettingType.pythonPath);
-    if (!currentPythonPath) {
-      const defaultEnv = await this.registry.getDefaultEnvironment();
-      if (defaultEnv) {
-        currentPythonPath = defaultEnv.path;
-      }
-    }
-
-    this._envSelectPopup.setCurrentPythonPath(currentPythonPath);
+    const serverInfo = this.getServerInfo();
+    this._envSelectPopup.setCurrentPythonPath(serverInfo?.environment?.path);
+    this._envSelectPopup.resetView();
 
     this._window.addBrowserView(this._envSelectPopup.view.view);
     this._envSelectPopupVisible = true;
     this._resizeEnvSelectPopup();
     this._envSelectPopup.view.view.webContents.focus();
+
+    if (userSettings.getValue(SettingType.notifyOnBundledEnvUpdates)) {
+      let showUpdateBundledEnvAction = false;
+      if (
+        serverInfo &&
+        serverInfo.type === 'local' &&
+        serverInfo.environment?.path === getBundledPythonPath()
+      ) {
+        if (!this._registry.bundledEnvironmentIsLatest()) {
+          showUpdateBundledEnvAction = true;
+        }
+      }
+      this._envSelectPopup.showUpdateBundledEnvAction(
+        showUpdateBundledEnvAction
+      );
+    }
   }
 
   private _resizeEnvSelectPopup() {
@@ -1459,6 +1643,29 @@ export class SessionWindow implements IDisposable {
     this._updateContentView();
   }
 
+  private async _resetUIModeToSessionDefault() {
+    await this._labView.labUIReady;
+
+    this._wsSettings.unsetValue(SettingType.uiMode);
+    this._wsSettings.save();
+
+    const defaultUIMode = userSettings.getValue(
+      this._labView.shouldSetToSingleFileUIMode()
+        ? SettingType.uiModeForSingleFileOpen
+        : SettingType.uiMode
+    );
+    this._labView.setUIMode(defaultUIMode);
+  }
+
+  private async _setUIMode(uiMode: UIMode, save: boolean = true) {
+    await this._labView.labUIReady;
+    if (save) {
+      this._wsSettings.setValue(SettingType.uiMode, uiMode);
+      this._wsSettings.save();
+    }
+    this._labView.setUIMode(uiMode);
+  }
+
   private _newWindow() {
     this._app.createNewEmptySession();
     // keep a free server up
@@ -1508,13 +1715,6 @@ export class SessionWindow implements IDisposable {
     if (filePaths.length > 0) {
       this.handleOpenFilesOrFolders(filePaths);
     }
-  }
-
-  private _onEnvironmentListUpdated() {
-    // TODO: add ability to update popup's env list
-    // recreate env select popup to have newly added env listed
-    this._hideEnvSelectPopup();
-    this._createEnvSelectPopup();
   }
 
   private _wsSettings: WorkspaceSettings;

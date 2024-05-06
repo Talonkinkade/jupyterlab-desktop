@@ -6,16 +6,17 @@ JupyterLab Desktop is the cross-platform desktop application for [JupyterLab](ht
 
 ## Installation
 
-If you have an existing JupyterLab Desktop installation, please uninstall it first by following the [uninstall instructions](user-guide.md#uninstalling-jupyterlab-desktop).
+Install JupyterLab Desktop using one of the methods listed below for your system.
 
-- [Debian, Ubuntu Linux Installer](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-Debian.deb)
-- [Red Hat, Fedora, SUSE Linux Installer](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-Fedora.rpm)
-- [macOS Intel Installer](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-macOS-x64.dmg), [macOS Apple silicon Installer](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-macOS-arm64.dmg)
-- [Windows Installer](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-Windows.exe)
+| Windows (10, 11)                                                                                                            | Mac (macOS 10.15+)                                                                                                                            | Linux                                                                                                                                                   |
+| --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [x64 Installer](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-Windows-x64.exe) | [arm64 Installer (Apple silicon)](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-macOS-arm64.dmg) | [Snap Store [recommended]](https://snapcraft.io/jupyterlab-desktop)                                                                                     |
+|                                                                                                                             | [x64 Installer (Intel chip)](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-macOS-x64.dmg)        | [.deb x64 Installer (Debian, Ubuntu)](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-Debian-x64.deb)        |
+|                                                                                                                             |                                                                                                                                               | [.rpm x64 Installer (Red Hat, Fedora, SUSE)](https://github.com/jupyterlab/jupyterlab-desktop/releases/latest/download/JupyterLab-Setup-Fedora-x64.rpm) |
 
 Additionally, JupyterLab Desktop can be installed on Windows via winget: `winget install jupyterlab`.
 
-Please check out the [Python Environment Customization Guide](user-guide.md#Customizing-the-Bundled-Python-Environment) if you plan to customize the Python environment to add new packages.
+If you need to remove a previous JupyterLab Desktop installation, please follow the [uninstall instructions](user-guide.md#uninstalling-jupyterlab-desktop).
 
 ## Launching JupyterLab Desktop
 
@@ -65,14 +66,20 @@ Previously opened sessions are stored as part of application data and they are l
 - Connect to existing JupyterLab server
   - `jlab https://example.org/lab?token=abcde`
 
-For additional CLI options run `jlab --help` in command line.
+See [CLI documentation](cli.md) for more CLI commands and options.
 
 ### JupyterLab Extension support
 
 JupyterLab Desktop currently supports user-friendly [prebuilt](https://jupyterlab.readthedocs.io/en/stable/extension/extension_dev.html#overview-of-extensions) extensions. Source extensions which require rebuilding are not supported.
 
-### See [user guide](user-guide.md) for configuration options
+### Guides and Help
 
-### See [troubleshooting guide](troubleshoot.md) for troubleshooting issues
+- See [user guide](user-guide.md) for configuration options
 
-### For contributing, see [developer documentation](dev.md)
+- [Python environment management](python-env-management.md) guide for managing Python environments on your system using JupyterLab Desktop
+
+- See [CLI documentation](cli.md) for CLI commands and options
+
+- See [troubleshooting guide](troubleshoot.md) for troubleshooting issues
+
+- For contributing, see [developer documentation](dev.md)
